@@ -1,453 +1,251 @@
 """
-Routing Module - Implements Dijkstra and A* algorithms for pathfinding
-Smart City Navigator - AI-Based Smart City Navigation System
+Smart City Navigator - Routing Module
+Handles Geoapify API calls for multi-route optimization with traffic-aware selection.
 """
 
-import heapq
-import math
 import random
-from typing import Dict, List, Tuple, Optional, Set
-from dataclasses import dataclass
+import httpx
 from datetime import datetime
-
-try:
-    from .graph_builder import GraphBuilder
-    from .ai_model import TrafficPredictor
-except ImportError:
-    from graph_builder import GraphBuilder
-    from ai_model import TrafficPredictor
+from typing import List, Dict, Any, Tuple
+from math import radians, sin, cos, sqrt, atan2
 
 
-@dataclass
-class Node:
-    """Represents a node in the routing graph"""
-    id: str
-    lat: float
-    lon: float
-    name: Optional[str] = None
+class RoutingClient:
+    """Client for Geoapify Routing API with intelligent traffic-aware route selection."""
     
-    def __hash__(self):
-        return hash(self.id)
-    
-    def __eq__(self, other):
-        return self.id == other.id
-
-
-@dataclass
-class Edge:
-    """Represents an edge (road) between two nodes"""
-    source: str
-    target: str
-    distance: float
-    road_type: str = "local"
-    traffic_level: float = 0.0
-    
-    @property
-    def travel_time(self) -> float:
-        """Calculate travel time based on distance and traffic"""
-        base_speed = {
-            "highway": 100,
-            "arterial": 60,
-            "local": 40
-        }
-        speed = base_speed.get(self.road_type, 40)
-        congestion_multiplier = 1 + (self.traffic_level * 1.5)
-        return (self.distance / speed) * 60
-
-
-class PriorityQueue:
-    """Min-heap priority queue implementation"""
-    
-    def __init__(self):
-        self.heap: List[Tuple[float, str]] = []
-        self.entries: Dict[str, float] = {}
-        self.removed: Set[str] = set()
-    
-    def add(self, priority: float, item: str):
-        if item in self.entries:
-            if priority < self.entries[item]:
-                self._remove(item)
-        else:
-            self.entries[item] = priority
-            heapq.heappush(self.heap, (priority, item))
-    
-    def pop(self) -> Optional[str]:
-        while self.heap:
-            priority, item = heapq.heappop(self.heap)
-            if item not in self.removed:
-                del self.entries[item]
-                return item
-        return None
-    
-    def _remove(self, item: str):
-        self.removed.add(item)
-    
-    def __len__(self) -> int:
-        return len(self.entries)
-    
-    def __contains__(self, item: str) -> bool:
-        return item in self.entries and item not in self.removed
-
-
-class Router:
-    """
-    Router class implementing Dijkstra and A* algorithms
-    for optimal pathfinding in the city navigation system.
-    """
-    
-    def __init__(self):
-        self.graph_builder = GraphBuilder()
-        self.traffic_predictor = TrafficPredictor()
-        self._traffic_cache: Dict[str, float] = {}
-        self._last_traffic_update: Optional[datetime] = None
-    
-    def _update_traffic(self, hour: int, day_of_week: int):
-        """Update traffic conditions with dynamic simulation"""
-        current_time = datetime.now()
-        
-        if self._last_traffic_update is None or \
-           (current_time - self._last_traffic_update).seconds > 60:
-            
-            for edge_key, edge_data in self.graph_builder.get_edges_dict().items():
-                traffic = self._simulate_traffic(hour, day_of_week, edge_data["road_type"])
-                self._traffic_cache[edge_key] = traffic
-                edge_data["traffic_level"] = traffic
-            
-            self._last_traffic_update = current_time
-    
-    def _simulate_traffic(self, hour: int, day_of_week: int, road_type: str) -> float:
+    def __init__(self, api_key: str, base_url: str = "https://api.geoapify.com"):
         """
-        Simulate traffic based on time of day, day of week, and road type.
-        Traffic changes each time due to stochastic variation.
-        """
-        base_traffic = 0.2
-        
-        if 7 <= hour <= 9:
-            base_traffic = 0.7
-        elif 12 <= hour <= 14:
-            base_traffic = 0.5
-        elif 17 <= hour <= 19:
-            base_traffic = 0.8
-        elif 22 <= hour or hour <= 5:
-            base_traffic = 0.1
-        
-        road_factor = {
-            "highway": 1.3,
-            "arterial": 1.1,
-            "local": 0.9
-        }
-        
-        day_factor = 1.0
-        if day_of_week >= 5:
-            day_factor = 0.7
-        
-        random_factor = random.uniform(0.8, 1.2)
-        
-        traffic = base_traffic * road_factor.get(road_type, 1.0) * day_factor * random_factor
-        return min(1.0, max(0.0, traffic))
-    
-    def get_traffic_simulation(self) -> Dict:
-        """Get current traffic simulation data"""
-        hour = datetime.now().hour
-        day_of_week = datetime.now().weekday()
-        
-        self._update_traffic(hour, day_of_week)
-        
-        avg_traffic = sum(self._traffic_cache.values()) / len(self._traffic_cache) if self._traffic_cache else 0.5
-        
-        traffic_zones = []
-        for edge_key, traffic in self._traffic_cache.items():
-            source, target = edge_key
-            traffic_zones.append({
-                "edge": edge_key,
-                "level": traffic,
-                "status": "congested" if traffic > 0.7 else "normal" if traffic > 0.3 else "clear"
-            })
-        
-        return {
-            "congestion_level": avg_traffic,
-            "zones": traffic_zones[:10],
-            "hour": hour,
-            "day_of_week": day_of_week,
-            "traffic_pattern": self._get_traffic_pattern(hour)
-        }
-    
-    def _get_traffic_pattern(self, hour: int) -> str:
-        """Get human-readable traffic pattern description"""
-        if 7 <= hour <= 9:
-            return "Morning Rush Hour"
-        elif 12 <= hour <= 14:
-            return "Lunch Time Traffic"
-        elif 17 <= hour <= 19:
-            return "Evening Rush Hour"
-        elif 22 <= hour or hour <= 5:
-            return "Night Time - Light Traffic"
-        elif 10 <= hour <= 11:
-            return "Late Morning - Moderate"
-        elif 15 <= hour <= 16:
-            return "Afternoon - Building Up"
-        else:
-            return "Normal Traffic"
-    
-    def calculate_route(
-        self,
-        source: Tuple[float, float],
-        destination: Tuple[float, float],
-        algorithm: str = "dijkstra",
-        current_hour: int = None,
-        day_of_week: int = None,
-        avoid_traffic: bool = False
-    ) -> Dict:
-        """
-        Calculate optimal route using specified algorithm.
+        Initialize the routing client.
         
         Args:
-            source: (latitude, longitude) tuple
-            destination: (latitude, longitude) tuple
-            algorithm: "dijkstra" or "astar"
-            current_hour: Current hour for traffic simulation
-            day_of_week: Day of week for traffic simulation
-            avoid_traffic: Whether to avoid high traffic routes
-        
-        Returns:
-            Dictionary with route information including path, distance, duration
+            api_key: Geoapify API key for authentication
+            base_url: Base URL for Geoapify API (default: https://api.geoapify.com)
         """
-        if current_hour is None:
-            current_hour = datetime.now().hour
-        if day_of_week is None:
-            day_of_week = datetime.now().weekday()
+        self.api_key = api_key
+        self.base_url = base_url
+        self.routing_url = f"{base_url}/v1/routing"
+    
+    def _get_traffic_factor(self, hour: int) -> Tuple[float, str]:
+        """
+        Calculate traffic factor based on time of day.
         
-        self._update_traffic(current_hour, day_of_week)
-        
-        source_node = self.graph_builder.find_nearest_node(source)
-        dest_node = self.graph_builder.find_nearest_node(destination)
-        
-        if algorithm.lower() == "astar":
-            path, nodes_explored = self._astar_search(
-                source_node, dest_node, avoid_traffic
-            )
+        Args:
+            hour: Hour of day (0-23)
+            
+        Returns:
+            Tuple of (traffic_factor, traffic_label)
+        """
+        # Define base traffic factors for different time periods
+        if 7 <= hour < 10:
+            # Morning Rush: 07:00–10:00
+            base = 2.0
+        elif 10 <= hour < 16:
+            # Afternoon: 10:00–16:00
+            base = 1.5
+        elif 16 <= hour < 20:
+            # Evening Rush: 16:00–20:00
+            base = 2.0
         else:
-            path, nodes_explored = self._dijkstra_search(
-                source_node, dest_node, avoid_traffic
-            )
+            # Night: 20:00–07:00
+            base = 1.0
+        
+        # Apply ±10% random variation for simulation
+        variation = random.uniform(0.9, 1.1)
+        traffic_factor = round(base * variation, 2)
+        
+        # Determine traffic label based on factor
+        if traffic_factor < 1.2:
+            traffic_label = "Low"
+        elif traffic_factor < 1.7:
+            traffic_label = "Medium"
+        else:
+            traffic_label = "High"
+        
+        return traffic_factor, traffic_label
+    
+    def _extract_coordinates(self, geometry: Dict[str, Any]) -> List[List[float]]:
+        """
+        Extract coordinate pairs from GeoJSON LineString geometry.
+        
+        Args:
+            geometry: GeoJSON geometry object (LineString)
+            
+        Returns:
+            List of [lat, lng] coordinate pairs
+        """
+        coordinates = geometry.get("coordinates", [])
+        # GeoJSON uses [lng, lat] format, convert to [lat, lng]
+        return [[coord[1], coord[0]] for coord in coordinates]
+    
+    def _calculate_distance_from_geometry(self, geometry: Dict[str, Any]) -> float:
+        """
+        Calculate total distance in km from route geometry.
+        Uses Haversine formula to sum distances between consecutive points.
+        
+        Args:
+            geometry: GeoJSON geometry object (LineString)
+            
+        Returns:
+            Total distance in kilometers
+        """
+        coordinates = geometry.get("coordinates", [])
+        if len(coordinates) < 2:
+            return 0.0
         
         total_distance = 0.0
-        total_duration = 0.0
-        traffic_score = 0.0
+        earth_radius_km = 6371.0  # Earth's radius in kilometers
         
-        path_coordinates = []
-        for node_id in path:
-            node_data = self.graph_builder.nodes[node_id]
-            path_coordinates.append({
-                "lat": node_data["lat"],
-                "lon": node_data["lon"],
-                "node_id": node_id
-            })
-        
-        for i in range(len(path) - 1):
-            edge_key = tuple(sorted([path[i], path[i + 1]]))
-            edge_data = self.graph_builder.get_edge_data(edge_key)
+        for i in range(len(coordinates) - 1):
+            lon1, lat1 = coordinates[i]
+            lon2, lat2 = coordinates[i + 1]
             
-            if edge_data:
-                total_distance += edge_data["distance"]
-                total_duration += edge_data.get("travel_time", total_distance / 60 * 60)
-                traffic_score += edge_data.get("traffic_level", 0.5)
+            # Convert to radians
+            lat1_rad = radians(lat1)
+            lat2_rad = radians(lat2)
+            delta_lat = radians(lat2 - lat1)
+            delta_lon = radians(lon2 - lon1)
+            
+            # Haversine formula
+            a = sin(delta_lat / 2) ** 2 + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2) ** 2
+            c = 2 * atan2(sqrt(a), sqrt(1 - a))
+            
+            distance = earth_radius_km * c
+            total_distance += distance
         
-        if len(path) > 1:
-            traffic_score /= (len(path) - 1)
-        
-        predicted_duration = self.traffic_predictor.predict(
-            hour=current_hour,
-            day_of_week=day_of_week,
-            road_type="arterial",
-            distance=total_distance,
-            is_peak_hour=current_hour in [8, 9, 17, 18, 19]
-        )
-        
-        final_duration = predicted_duration["travel_time"] * (total_distance / max(total_distance, 1))
-        
-        return {
-            "path": path_coordinates,
-            "distance": round(total_distance, 2),
-            "duration": round(final_duration, 2),
-            "traffic_score": round(traffic_score, 3),
-            "nodes_explored": nodes_explored,
-            "algorithm": algorithm,
-            "source_node": source_node,
-            "destination_node": dest_node
-        }
+        return round(total_distance, 2)
     
-    def _dijkstra_search(
-        self,
-        start: str,
-        goal: str,
-        avoid_traffic: bool = False
-    ) -> Tuple[List[str], int]:
-        """
-        Dijkstra's algorithm implementation.
-        Explores all possible paths to find the shortest path.
-        """
-        distances: Dict[str, float] = {start: 0}
-        previous: Dict[str, Optional[str]] = {start: None}
-        visited: Set[str] = set()
-        nodes_explored = 0
-        
-        pq = PriorityQueue()
-        pq.add(0, start)
-        
-        while len(pq) > 0:
-            current = pq.pop()
-            
-            if current is None:
-                break
-            
-            if current in visited:
-                continue
-            
-            visited.add(current)
-            nodes_explored += 1
-            
-            if current == goal:
-                break
-            
-            neighbors = self.graph_builder.get_neighbors(current)
-            
-            for neighbor, edge_data in neighbors:
-                if neighbor in visited:
-                    continue
-                
-                edge_weight = edge_data["distance"]
-                
-                if avoid_traffic:
-                    traffic_penalty = edge_data.get("traffic_level", 0) * 5
-                    edge_weight += traffic_penalty
-                
-                new_dist = distances[current] + edge_weight
-                
-                if neighbor not in distances or new_dist < distances[neighbor]:
-                    distances[neighbor] = new_dist
-                    previous[neighbor] = current
-                    pq.add(new_dist, neighbor)
-        
-        path = self._reconstruct_path(previous, goal)
-        return path, nodes_explored
-    
-    def _astar_search(
-        self,
-        start: str,
-        goal: str,
-        avoid_traffic: bool = False
-    ) -> Tuple[List[str], int]:
-        """
-        A* algorithm implementation.
-        Uses heuristic to guide search toward goal, making it more efficient.
-        """
-        def heuristic(node_id: str) -> float:
-            """Euclidean distance heuristic"""
-            node_data = self.graph_builder.nodes[node_id]
-            goal_data = self.graph_builder.nodes[goal]
-            
-            lat1, lon1 = node_data["lat"], node_data["lon"]
-            lat2, lon2 = goal_data["lat"], goal_data["lon"]
-            
-            return math.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2) * 111
-        
-        g_scores: Dict[str, float] = {start: 0}
-        f_scores: Dict[str, float] = {start: heuristic(start)}
-        previous: Dict[str, Optional[str]] = {start: None}
-        visited: Set[str] = set()
-        nodes_explored = 0
-        
-        pq = PriorityQueue()
-        pq.add(f_scores[start], start)
-        
-        while len(pq) > 0:
-            current = pq.pop()
-            
-            if current is None:
-                break
-            
-            if current in visited:
-                continue
-            
-            visited.add(current)
-            nodes_explored += 1
-            
-            if current == goal:
-                break
-            
-            neighbors = self.graph_builder.get_neighbors(current)
-            
-            for neighbor, edge_data in neighbors:
-                if neighbor in visited:
-                    continue
-                
-                tentative_g = g_scores[current] + edge_data["distance"]
-                
-                if avoid_traffic:
-                    traffic_penalty = edge_data.get("traffic_level", 0) * 5
-                    tentative_g += traffic_penalty
-                
-                if neighbor not in g_scores or tentative_g < g_scores[neighbor]:
-                    g_scores[neighbor] = tentative_g
-                    f_scores[neighbor] = tentative_g + heuristic(neighbor)
-                    previous[neighbor] = current
-                    pq.add(f_scores[neighbor], neighbor)
-        
-        path = self._reconstruct_path(previous, goal)
-        return path, nodes_explored
-    
-    def _reconstruct_path(
-        self,
-        previous: Dict[str, Optional[str]],
-        goal: str
-    ) -> List[str]:
-        """Reconstruct path from previous node dictionary"""
-        path = []
-        current: Optional[str] = goal
-        
-        while current is not None:
-            path.append(current)
-            current = previous.get(current)
-        
-        path.reverse()
-        return path
-    
-    def get_alternative_routes(
+    async def calculate_routes(
         self,
         source: Tuple[float, float],
         destination: Tuple[float, float],
-        num_alternatives: int = 3
-    ) -> List[Dict]:
-        """Get multiple alternative routes"""
-        routes = []
+        mode: str = "drive"
+    ) -> Dict[str, Any]:
+        """
+        Calculate multiple routes between source and destination using Geoapify API.
         
-        for i in range(num_alternatives):
-            avoid_traffic = i % 2 == 1
-            algorithm = "astar" if i % 2 == 0 else "dijkstra"
+        Args:
+            source: Tuple of (lat, lon) for starting point
+            destination: Tuple of (lat, lon) for ending point
+            mode: Travel mode - "drive", "walk", or "bike"
             
-            route = self.calculate_route(
-                source=source,
-                destination=destination,
-                algorithm=algorithm,
-                avoid_traffic=avoid_traffic
+        Returns:
+            Dictionary with routes array, best_route_id, and metadata
+            
+        Raises:
+            HTTPException: On timeout, invalid API key, or no routes found
+        """
+        # Validate travel mode
+        valid_modes = ["drive", "walk", "bike"]
+        if mode not in valid_modes:
+            mode = "drive"
+        
+        # Format waypoints: lat,lon|lat,lon
+        waypoints = f"{source[0]},{source[1]}|{destination[0]},{destination[1]}"
+        
+        # Build request parameters
+        params = {
+            "waypoints": waypoints,
+            "mode": mode,
+            "alternatives": "true",  # Request multiple route alternatives
+            "apiKey": self.api_key
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    self.routing_url,
+                    params=params
+                )
+                
+                # Handle HTTP status codes
+                if response.status_code == 401:
+                    raise HTTPException(status_code=401, detail="Invalid API key")
+                elif response.status_code != 200:
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=f"Geoapify API error: {response.text}"
+                    )
+                
+                data = response.json()
+        
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=503,
+                detail="Geoapify API timeout - please try again"
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Network error connecting to Geoapify: {str(e)}"
+            )
+        
+        # Extract routes from response features
+        features = data.get("features", [])
+        
+        if not features:
+            raise HTTPException(
+                status_code=404,
+                detail="No routes found between these locations"
+            )
+        
+        # Get current time for traffic calculation
+        now = datetime.now()
+        hour = now.hour
+        
+        # Process each route
+        routes = []
+        for index, feature in enumerate(features):
+            geometry = feature.get("geometry", {})
+            properties = feature.get("properties", {})
+            
+            # Extract path coordinates
+            path = self._extract_coordinates(geometry)
+            
+            # Get distance from properties (in meters, convert to km)
+            distance_m = properties.get("distance", 0)
+            distance_km = round(distance_m / 1000, 2) if distance_m else self._calculate_distance_from_geometry(geometry)
+            
+            # Get traffic factor based on current time
+            traffic_factor, traffic_label = self._get_traffic_factor(hour)
+            
+            # Calculate final cost (distance weighted by traffic)
+            final_cost = round(distance_km * traffic_factor, 2)
+            
+            # Estimate time assuming 40 km/h free-flow speed, adjusted by traffic
+            estimated_time_minutes = round(
+                (distance_km / 40) * traffic_factor * 60,
+                1
             )
             
-            if route["path"]:
-                routes.append({
-                    **route,
-                    "route_id": i + 1,
-                    "description": self._get_route_description(route, i)
-                })
+            route = {
+                "id": index + 1,
+                "path": path,
+                "distance_km": distance_km,
+                "traffic": traffic_label,
+                "traffic_factor": traffic_factor,
+                "cost": final_cost,
+                "estimated_time_minutes": estimated_time_minutes
+            }
+            routes.append(route)
         
-        routes.sort(key=lambda x: x["duration"])
-        return routes
-    
-    def _get_route_description(self, route: Dict, index: int) -> str:
-        """Generate human-readable route description"""
-        descriptions = [
-            "Fastest Route",
-            "Shortest Distance",
-            "Avoid Traffic"
-        ]
-        return descriptions[index] if index < len(descriptions) else f"Alternative Route {index + 1}"
+        # Select best route (lowest cost)
+        best_route = min(routes, key=lambda x: x["cost"])
+        best_route_id = best_route["id"]
+        
+        # Build response
+        result = {
+            "routes": routes,
+            "best_route_id": best_route_id,
+            "total_routes": len(routes),
+            "calculation_timestamp": now.isoformat()
+        }
+        
+        return result
+
+
+class HTTPException(Exception):
+    """Custom HTTP exception for routing errors."""
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(detail)
