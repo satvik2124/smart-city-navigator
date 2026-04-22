@@ -10,49 +10,42 @@ from datetime import datetime
 from typing import Optional, List, Tuple
 from contextlib import asynccontextmanager
 
+# Load .env BEFORE reading any environment variables
+try:
+    from dotenv import load_dotenv
+    _base = os.path.dirname(os.path.abspath(__file__))
+    load_dotenv(dotenv_path=os.path.join(_base, ".env"))
+    load_dotenv(dotenv_path=os.path.join(_base, "..", ".env"))
+except ImportError:
+    pass
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from pydantic.functional_validators import model_validator
 
-# Load .env file FIRST before reading any environment variables
-from dotenv import load_dotenv
-# Look for .env in backend folder, then parent folder
-env_path = os.path.join(os.path.dirname(__file__), ".env")
-if not os.path.exists(env_path):
-    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-load_dotenv(dotenv_path=env_path)
-print(f"Loading .env from: {env_path}")
-
-# Now read the API key
-API_KEY = os.getenv("GEOAPIFY_API_KEY", "")
-
-# Debug logging
-print("=" * 50)
-print("Loaded API KEY:", API_KEY[:10] + "..." if API_KEY else "NOT FOUND")
-print("=" * 50)
-
-if not API_KEY or API_KEY == "YOUR_API_KEY_HERE":
-    raise ValueError("API key not loaded! Check .env file")
-
 from routing import RoutingClient, HTTPException as RoutingHTTPException
+
+
+API_KEY = os.getenv("GEOAPIFY_API_KEY", "")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager - handles startup and shutdown."""
     app.state.routing_client = None
-    if API_KEY and API_KEY != "YOUR_API_KEY_HERE":
+    if API_KEY and API_KEY not in ("YOUR_API_KEY_HERE", ""):
         app.state.routing_client = RoutingClient(API_KEY)
-        print("Geoapify Routing client initialized")
+        print(f"✓ Geoapify Routing client initialized (key: {API_KEY[:8]}...)")
     else:
-        print("WARNING: GEOAPIFY_API_KEY not set")
-    
+        print("⚠  WARNING: GEOAPIFY_API_KEY not set — route calculation disabled.")
+        print("   Get a free key at https://www.geoapify.com/ and add it to .env")
+
     init_database()
-    print("Database initialized")
-    
+    print("✓ Database initialized")
+
     yield
-    
+
     print("Application shutting down")
 
 
@@ -76,7 +69,7 @@ class RouteRequest(BaseModel):
     source: str = Field(..., min_length=3, max_length=150, description="Source location name or address")
     destination: str = Field(..., min_length=3, max_length=150, description="Destination location name or address")
     mode: str = Field(default="drive", description="Travel mode: drive, walk, or bike")
-    
+
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
@@ -84,7 +77,7 @@ class RouteRequest(BaseModel):
         if v.lower() not in valid_modes:
             raise ValueError(f"mode must be one of: {', '.join(valid_modes)}")
         return v.lower()
-    
+
     @model_validator(mode="after")
     def validate_locations_different(self) -> "RouteRequest":
         if self.source.lower().strip() == self.destination.lower().strip():
@@ -108,13 +101,13 @@ class RouteResponse(BaseModel):
     destination: dict
 
 
-DATABASE_PATH = "smart_city_navigator.db"
+DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smart_city_navigator.db")
 
 
 def init_database():
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS route_history (
             id TEXT PRIMARY KEY,
@@ -133,7 +126,7 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
+
     conn.commit()
     conn.close()
 
@@ -150,12 +143,12 @@ def save_route_to_history(
         (r for r in result["routes"] if r["id"] == result["best_route_id"]),
         result["routes"][0] if result["routes"] else {}
     )
-    
+
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute("""
-        INSERT INTO route_history (
+        INSERT OR IGNORE INTO route_history (
             id, source_name, destination_name,
             source_lat, source_lon, destination_lat, destination_lon,
             total_routes, best_route_id, best_route_cost,
@@ -176,37 +169,37 @@ def save_route_to_history(
         best_route.get("estimated_time_minutes", 0),
         result["calculation_timestamp"]
     ))
-    
+
     conn.commit()
     conn.close()
 
 
 async def geocode_location(location: str, api_key: str) -> Optional[GeocodeResult]:
     import httpx
-    
+
     url = "https://api.geoapify.com/v1/geocode/search"
     params = {
         "text": location,
         "apiKey": api_key,
         "limit": 1
     }
-    
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, params=params)
-            
+
             if response.status_code == 401:
-                raise HTTPException(status_code=401, detail="Invalid API key")
-            
+                raise HTTPException(status_code=401, detail="Invalid Geoapify API key. Check your GEOAPIFY_API_KEY in .env")
+
             if response.status_code != 200:
                 return None
-            
+
             data = response.json()
             features = data.get("features", [])
-            
+
             if not features:
                 return None
-            
+
             result = features[0]
             props = result.get("properties", {})
             return GeocodeResult(
@@ -215,7 +208,7 @@ async def geocode_location(location: str, api_key: str) -> Optional[GeocodeResul
                 lon=props.get("lon", 0),
                 full_address=props.get("formatted", None)
             )
-    
+
     except (httpx.TimeoutException, httpx.RequestError):
         return None
 
@@ -226,20 +219,23 @@ async def root():
         "name": "Smart City Navigator API",
         "version": "3.0.0",
         "description": "AI-Powered Multi-Route Navigation System",
-        "geoapify_enabled": bool(API_KEY and API_KEY != "YOUR_API_KEY_HERE"),
+        "geoapify_enabled": bool(API_KEY and API_KEY not in ("YOUR_API_KEY_HERE", "")),
+        "status": "ready"
     }
 
 
 @app.get("/health")
 async def health_check():
+    key_status = "connected" if (API_KEY and API_KEY not in ("YOUR_API_KEY_HERE", "")) else "missing"
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "services": {
             "api": "operational",
-            "geoapify": "connected" if API_KEY else "disabled",
+            "geoapify": key_status,
             "database": "connected"
-        }
+        },
+        "geoapify_key_set": key_status == "connected"
     }
 
 
@@ -248,23 +244,27 @@ async def calculate_route(request: RouteRequest):
     if not app.state.routing_client:
         raise HTTPException(
             status_code=503,
-            detail="Geoapify API key not configured. Please set GEOAPIFY_API_KEY."
+            detail=(
+                "Geoapify API key not configured. "
+                "Please set GEOAPIFY_API_KEY in your .env file. "
+                "Get a free key at https://www.geoapify.com/"
+            )
         )
-    
+
     source_geo = await geocode_location(request.source, API_KEY)
     if not source_geo:
         raise HTTPException(
             status_code=404,
-            detail=f"Could not find source location: {request.source}"
+            detail=f"Could not find source location: '{request.source}'. Try a more specific address."
         )
-    
+
     dest_geo = await geocode_location(request.destination, API_KEY)
     if not dest_geo:
         raise HTTPException(
             status_code=404,
-            detail=f"Could not find destination location: {request.destination}"
+            detail=f"Could not find destination location: '{request.destination}'. Try a more specific address."
         )
-    
+
     try:
         routing_result = await app.state.routing_client.calculate_routes(
             source=(source_geo.lat, source_geo.lon),
@@ -273,9 +273,9 @@ async def calculate_route(request: RouteRequest):
         )
     except RoutingHTTPException as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    
+
     route_id = str(uuid.uuid4())[:8]
-    
+
     try:
         save_route_to_history(
             route_id=route_id,
@@ -286,8 +286,8 @@ async def calculate_route(request: RouteRequest):
             result=routing_result
         )
     except Exception as e:
-        print(f"Database save error: {e}")
-    
+        print(f"Database save error (non-fatal): {e}")
+
     return RouteResponse(
         routes=routing_result["routes"],
         best_route_id=routing_result["best_route_id"],
@@ -313,16 +313,16 @@ async def get_routes_history(limit: int = Query(default=10, ge=1, le=50)):
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
+
     cursor.execute("""
         SELECT * FROM route_history
         ORDER BY created_at DESC
         LIMIT ?
     """, (limit,))
-    
+
     rows = cursor.fetchall()
     conn.close()
-    
+
     routes = []
     for row in rows:
         routes.append({
@@ -333,10 +333,10 @@ async def get_routes_history(limit: int = Query(default=10, ge=1, le=50)):
             "best_route_id": row["best_route_id"],
             "calculation_timestamp": row["calculation_timestamp"],
         })
-    
+
     return {"status": "success", "count": len(routes), "routes": routes}
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
