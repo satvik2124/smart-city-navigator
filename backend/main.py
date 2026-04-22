@@ -31,7 +31,6 @@ except ImportError:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager - handles startup and shutdown."""
-    # Initialize routing client if API key is available
     app.state.routing_client = None
     if API_KEY and API_KEY != "YOUR_API_KEY_HERE":
         app.state.routing_client = RoutingClient(API_KEY)
@@ -39,17 +38,14 @@ async def lifespan(app: FastAPI):
     else:
         print("WARNING: GEOAPIFY_API_KEY not set")
     
-    # Initialize database on startup
     init_database()
     print("Database initialized")
     
     yield
     
-    # Cleanup on shutdown (if needed)
     print("Application shutting down")
 
 
-# Create FastAPI application instance
 app = FastAPI(
     title="Smart City Navigator API",
     description="AI-Powered Navigation with Multi-Route Optimization",
@@ -57,7 +53,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware for frontend access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -67,33 +62,14 @@ app.add_middleware(
 )
 
 
-# =============================================================================
-# Pydantic Models for Request/Response Validation
-# =============================================================================
-
 class RouteRequest(BaseModel):
-    """Request model for route calculation endpoint."""
-    source: str = Field(
-        ...,
-        min_length=3,
-        max_length=150,
-        description="Source location name or address"
-    )
-    destination: str = Field(
-        ...,
-        min_length=3,
-        max_length=150,
-        description="Destination location name or address"
-    )
-    mode: str = Field(
-        default="drive",
-        description="Travel mode: drive, walk, or bike"
-    )
+    source: str = Field(..., min_length=3, max_length=150, description="Source location name or address")
+    destination: str = Field(..., min_length=3, max_length=150, description="Destination location name or address")
+    mode: str = Field(default="drive", description="Travel mode: drive, walk, or bike")
     
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        """Ensure mode is one of the allowed values."""
         valid_modes = ["drive", "walk", "bike"]
         if v.lower() not in valid_modes:
             raise ValueError(f"mode must be one of: {', '.join(valid_modes)}")
@@ -101,14 +77,12 @@ class RouteRequest(BaseModel):
     
     @model_validator(mode="after")
     def validate_locations_different(self) -> "RouteRequest":
-        """Ensure source and destination are different."""
         if self.source.lower().strip() == self.destination.lower().strip():
             raise ValueError("source and destination cannot be the same")
         return self
 
 
 class GeocodeResult(BaseModel):
-    """Result of geocoding a location."""
     name: str
     lat: float
     lon: float
@@ -116,7 +90,6 @@ class GeocodeResult(BaseModel):
 
 
 class RouteResponse(BaseModel):
-    """Response model for route calculation."""
     routes: List[dict]
     best_route_id: int
     total_routes: int
@@ -125,19 +98,13 @@ class RouteResponse(BaseModel):
     destination: dict
 
 
-# =============================================================================
-# Database Functions
-# =============================================================================
-
 DATABASE_PATH = "smart_city_navigator.db"
 
 
 def init_database():
-    """Initialize SQLite database with required tables."""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     
-    # Create route_history table for storing route calculations
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS route_history (
             id TEXT PRIMARY KEY,
@@ -169,18 +136,6 @@ def save_route_to_history(
     dest_coords: Tuple[float, float],
     result: dict
 ):
-    """
-    Save route calculation to database history.
-    
-    Args:
-        route_id: Unique identifier for this route calculation
-        source_name: Name of source location
-        destination_name: Name of destination location
-        source_coords: Tuple of (lat, lon) for source
-        dest_coords: Tuple of (lat, lon) for destination
-        result: Full routing result dictionary
-    """
-    # Find best route info
     best_route = next(
         (r for r in result["routes"] if r["id"] == result["best_route_id"]),
         result["routes"][0] if result["routes"] else {}
@@ -216,21 +171,7 @@ def save_route_to_history(
     conn.close()
 
 
-# =============================================================================
-# Geocoding Functions (using httpx directly)
-# =============================================================================
-
 async def geocode_location(location: str, api_key: str) -> Optional[GeocodeResult]:
-    """
-    Geocode a location string to coordinates using Geoapify Geocoding API.
-    
-    Args:
-        location: Location name or address to geocode
-        api_key: Geoapify API key
-        
-    Returns:
-        GeocodeResult with coordinates or None if not found
-    """
     import httpx
     
     url = "https://api.geoapify.com/v1/geocode/search"
@@ -269,30 +210,18 @@ async def geocode_location(location: str, api_key: str) -> Optional[GeocodeResul
         return None
 
 
-# =============================================================================
-# API Endpoints
-# =============================================================================
-
 @app.get("/")
 async def root():
-    """Root endpoint - returns API information."""
     return {
         "name": "Smart City Navigator API",
         "version": "3.0.0",
         "description": "AI-Powered Multi-Route Navigation System",
         "geoapify_enabled": bool(API_KEY and API_KEY != "YOUR_API_KEY_HERE"),
-        "endpoints": {
-            "GET /health": "Health check",
-            "POST /calculate-route": "Calculate optimal routes between two locations",
-            "GET /routes-history": "Get recent route calculations",
-            "GET /routes-history/{id}": "Get specific route by ID"
-        }
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint - returns service status."""
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -306,20 +235,12 @@ async def health_check():
 
 @app.post("/calculate-route", response_model=RouteResponse)
 async def calculate_route(request: RouteRequest):
-    """
-    Calculate multiple optimal routes between source and destination.
-    
-    This endpoint geocodes both locations, calls the routing API to get
-    multiple route alternatives, and returns them with traffic-aware scoring.
-    """
-    # Check if routing client is available
     if not app.state.routing_client:
         raise HTTPException(
             status_code=503,
             detail="Geoapify API key not configured. Please set GEOAPIFY_API_KEY."
         )
     
-    # Geocode source location
     source_geo = await geocode_location(request.source, API_KEY)
     if not source_geo:
         raise HTTPException(
@@ -327,7 +248,6 @@ async def calculate_route(request: RouteRequest):
             detail=f"Could not find source location: {request.source}"
         )
     
-    # Geocode destination location
     dest_geo = await geocode_location(request.destination, API_KEY)
     if not dest_geo:
         raise HTTPException(
@@ -335,7 +255,6 @@ async def calculate_route(request: RouteRequest):
             detail=f"Could not find destination location: {request.destination}"
         )
     
-    # Calculate routes using routing client
     try:
         routing_result = await app.state.routing_client.calculate_routes(
             source=(source_geo.lat, source_geo.lon),
@@ -345,10 +264,8 @@ async def calculate_route(request: RouteRequest):
     except RoutingHTTPException as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     
-    # Generate unique route ID for history tracking
     route_id = str(uuid.uuid4())[:8]
     
-    # Save to database history
     try:
         save_route_to_history(
             route_id=route_id,
@@ -359,10 +276,8 @@ async def calculate_route(request: RouteRequest):
             result=routing_result
         )
     except Exception as e:
-        # Log error but don't fail the request
         print(f"Database save error: {e}")
     
-    # Build and return response
     return RouteResponse(
         routes=routing_result["routes"],
         best_route_id=routing_result["best_route_id"],
@@ -385,12 +300,6 @@ async def calculate_route(request: RouteRequest):
 
 @app.get("/routes-history")
 async def get_routes_history(limit: int = Query(default=10, ge=1, le=50)):
-    """
-    Get history of recent route calculations.
-    
-    Args:
-        limit: Maximum number of routes to return (default: 10, max: 50)
-    """
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -410,73 +319,13 @@ async def get_routes_history(limit: int = Query(default=10, ge=1, le=50)):
             "id": row["id"],
             "source_name": row["source_name"],
             "destination_name": row["destination_name"],
-            "source_coordinates": {
-                "lat": row["source_lat"],
-                "lon": row["source_lon"]
-            },
-            "destination_coordinates": {
-                "lat": row["destination_lat"],
-                "lon": row["destination_lon"]
-            },
             "total_routes": row["total_routes"],
             "best_route_id": row["best_route_id"],
-            "best_route": {
-                "cost": row["best_route_cost"],
-                "distance_km": row["best_route_distance"],
-                "estimated_time_minutes": row["best_route_time"]
-            },
             "calculation_timestamp": row["calculation_timestamp"],
-            "created_at": row["created_at"]
         })
     
     return {"status": "success", "count": len(routes), "routes": routes}
 
-
-@app.get("/routes-history/{route_id}")
-async def get_route_by_id(route_id: str):
-    """Get a specific route calculation by its ID."""
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute(
-        "SELECT * FROM route_history WHERE id = ?",
-        (route_id,)
-    )
-    
-    row = cursor.fetchone()
-    conn.close()
-    
-    if not row:
-        raise HTTPException(status_code=404, detail="Route not found")
-    
-    return {
-        "id": row["id"],
-        "source_name": row["source_name"],
-        "destination_name": row["destination_name"],
-        "source_coordinates": {
-            "lat": row["source_lat"],
-            "lon": row["source_lon"]
-        },
-        "destination_coordinates": {
-            "lat": row["destination_lat"],
-            "lon": row["destination_lon"]
-        },
-        "total_routes": row["total_routes"],
-        "best_route_id": row["best_route_id"],
-        "best_route": {
-            "cost": row["best_route_cost"],
-            "distance_km": row["best_route_distance"],
-            "estimated_time_minutes": row["best_route_time"]
-        },
-        "calculation_timestamp": row["calculation_timestamp"],
-        "created_at": row["created_at"]
-    }
-
-
-# =============================================================================
-# Application Entry Point
-# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn
