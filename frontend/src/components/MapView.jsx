@@ -1,294 +1,129 @@
-/**
- * MapView Component
- * Renders interactive map with multiple route polylines, markers, and animations.
- * Uses React-Leaflet for map rendering and animation.
- */
+ import React from "react";
+import { MapContainer, TileLayer, Polyline, CircleMarker } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
 
-import React, { useEffect, useRef, useState } from 'react';
-import { MapContainer, TileLayer, Polyline, Marker } from 'react-leaflet';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
-
-// Custom marker icons using DivIcon for "A" and "B" labels
-const createMarkerIcon = (label, color) => {
-  return L.divIcon({
-    className: 'custom-marker',
-    html: `<div style="
-      background-color: ${color};
-      color: white;
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: bold;
-      font-size: 14px;
-      border: 2px solid white;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-    ">${label}</div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-    popupAnchor: [0, -14]
-  });
-};
-
-// Static marker icons for start (A) and end (B)
-const startIcon = createMarkerIcon('A', '#22c55e'); // Green for start
-const endIcon = createMarkerIcon('B', '#ef4444');   // Red for end
-
-// Route colors by index - distinct colors for visual differentiation
-const ROUTE_COLORS = [
-  '#3b82f6', // Blue - index 0
-  '#f97316', // Orange - index 1
-  '#a855f7', // Purple - index 2
-  '#ec4899', // Pink - index 3
-];
-
-// Animation configuration
-const ANIMATION_INTERVAL_MS = 30;  // Update interval in milliseconds
-const POINTS_PER_TICK = 5;         // Number of points to reveal per tick
-
-/**
- * MapView Component
- * @param {Object} props - Component props
- * @param {Array} props.routes - Array of route objects with path coordinates
- * @param {number|null} props.bestRouteId - ID of the optimal route
- * @param {Function} props.onRouteClick - Callback when a route is clicked
- * @param {number|null} props.selectedRouteId - ID of currently selected route
- */
-function MapView({ routes = [], bestRouteId = null, onRouteClick, selectedRouteId = null }) {
-  // State for animated route progress
-  const [animatedPaths, setAnimatedPaths] = useState({});
-  const mapRef = useRef(null);
-  const animationIntervals = useRef({});
-
-  /**
-   * Calculate bounds to fit all routes in the map view
-   * Returns a Leaflet LatLngBounds object
-   */
-  const getRouteBounds = () => {
-    if (!routes || routes.length === 0) {
-      // Default to a central location if no routes
-      return [[28.6139, 77.2090], [28.6320, 77.2200]]; // Delhi area
+// Renders up to three routes simultaneously: fastest (blue), medium (yellow), congested (red)
+function MapView({ routes = [], bestRouteId = null, explorationPath = null }) {
+  // Node exploration animation on the Leaflet map (optional)
+  const [exploredIndex, setExploredIndex] = React.useState(-1);
+  React.useEffect(() => {
+    if (!explorationPath || explorationPath.length === 0) {
+      setExploredIndex(-1);
+      return;
     }
-
-    const allCoords = [];
-    routes.forEach(route => {
-      if (route.path && route.path.length > 0) {
-        allCoords.push(...route.path);
+    let i = -1;
+    setExploredIndex(-1);
+    const timer = setInterval(() => {
+      i += 1;
+      setExploredIndex(i);
+      if (i >= explorationPath.length - 1) {
+        clearInterval(timer);
       }
-    });
+    }, 600);
+    return () => clearInterval(timer);
+  }, [explorationPath]);
 
-    if (allCoords.length === 0) {
-      return [[28.6139, 77.2090], [28.6320, 77.2200]];
-    }
-
-    // Calculate bounding box
-    const lats = allCoords.map(coord => coord[0]);
-    const lngs = allCoords.map(coord => coord[1]);
-    
-    const minLat = Math.min(...lats);
-    const maxLat = Math.max(...lats);
-    const minLng = Math.min(...lngs);
-    const maxLng = Math.max(...lngs);
-
-    // Add padding to bounds
-    const latPadding = (maxLat - minLat) * 0.1 || 0.01;
-    const lngPadding = (maxLng - minLng) * 0.1 || 0.01;
-
-    return [
-      [minLat - latPadding, minLng - lngPadding],
-      [maxLat + latPadding, maxLng + lngPadding]
-    ];
+  // Helper: extract [lat, lon] path from geometry.coordinates (assuming [lon, lat] input)
+  const extractPath = (geometry) => {
+    if (!geometry?.coordinates) return [];
+    return geometry.coordinates
+      .filter((c) => Array.isArray(c) && c.length >= 2)
+      .map((c) => [c[1], c[0]]);
   };
 
-  /**
-   * Start animation for a specific route
-   * Progressively reveals coordinates over time
-   */
-  const startRouteAnimation = (routeId) => {
-    // Clear any existing animation for this route
-    if (animationIntervals.current[routeId]) {
-      clearInterval(animationIntervals.current[routeId]);
-    }
+  // Heuristic selectors: fastest (min time), medium (middle by time), congested (max traffic_level or time)
+  const center = [28.6139, 77.2090];
 
-    const route = routes.find(r => r.id === routeId);
-    if (!route || !route.path) return;
-
-    const totalPoints = route.path.length;
-    let currentProgress = 0;
-
-    // Initialize with first point
-    setAnimatedPaths(prev => ({
-      ...prev,
-      [routeId]: [route.path[0]]
-    }));
-
-    // Create interval to progressively add points
-    animationIntervals.current[routeId] = setInterval(() => {
-      currentProgress += POINTS_PER_TICK;
-      
-      if (currentProgress >= totalPoints) {
-        // Animation complete - show full path
-        setAnimatedPaths(prev => ({
-          ...prev,
-          [routeId]: route.path
-        }));
-        clearInterval(animationIntervals.current[routeId]);
-      } else {
-        // Show partial path
-        setAnimatedPaths(prev => ({
-          ...prev,
-          [routeId]: route.path.slice(0, currentProgress)
-        }));
-      }
-    }, ANIMATION_INTERVAL_MS);
+  const timeOf = (r) => (typeof r.time === 'number' ? r.time : Number.POSITIVE_INFINITY);
+  const trafficRank = (r) => {
+    // rank by traffic_level if present: high > medium > low
+    const t = r.traffic_level;
+    if (t === 'high') return 3;
+    if (t === 'medium') return 2;
+    if (t === 'low') return 1;
+    return 0;
   };
 
-  /**
-   * Effect to start animations when routes change
-   */
-  useEffect(() => {
-    // Start animations for all routes
-    routes.forEach(route => {
-      startRouteAnimation(route.id);
-    });
+  // Sort by time to determine fastest and median
+  const sortedByTime = [...routes].sort((a, b) => timeOf(a) - timeOf(b));
+  const fastestRoute = sortedByTime[0] ?? null;
+  const mediumRoute = sortedByTime.length >= 3
+    ? sortedByTime[Math.floor((sortedByTime.length - 1) / 2)]
+    : sortedByTime[1] ?? null;
 
-    // Cleanup intervals on unmount
-    return () => {
-      Object.values(animationIntervals.current).forEach(interval => {
-        clearInterval(interval);
-      });
-    };
-  }, [routes]);
+  // Congested: highest traffic level; fallback to highest time if necessary
+  const congestedRoute = [...routes]
+    .sort((a, b) => {
+      const ra = trafficRank(b) - trafficRank(a); // descending by traffic rank
+      if (ra !== 0) return ra;
+      // tie-breaker: higher time
+      return timeOf(b) - timeOf(a);
+    })[0] ?? null;
 
-  /**
-   * Effect to fit map bounds when routes change
-   */
-  useEffect(() => {
-    if (mapRef.current && routes.length > 0) {
-      const bounds = getRouteBounds();
-      mapRef.current.fitBounds(bounds, { padding: [50, 50] });
-    }
-  }, [routes]);
+  // Normalize: ensure we only render up to three routes
+  const toRender = [
+    { route: fastestRoute, color: 'blue' },
+    { route: mediumRoute, color: 'yellow' },
+    { route: congestedRoute, color: 'red' },
+  ].filter((r) => r.route && (r.route.geometry?.coordinates?.length ?? 0) > 0);
 
-  /**
-   * Get polyline styling based on route properties
-   * @param {number} index - Route index in the routes array
-   * @param {number} routeId - Route ID
-   * @returns {Object} Styling object for the polyline
-   */
-  const getPolylineStyle = (index, routeId) => {
-    const isBest = routeId === bestRouteId;
-    const isSelected = routeId === selectedRouteId;
+  // If a route is missing, fall back to existing rendering (older behavior) if any
+  const showLegacy = routes.length > 0 && toRender.length === 0;
 
-    if (isBest) {
-      return {
-        weight: 6,
-        opacity: 1.0,
-        color: '#22c55e', // Green for best route
-        smoothFactor: 1,
-        noClip: false
-      };
-    }
-
-    return {
-      weight: 3,
-      opacity: 0.6,
-      color: ROUTE_COLORS[index % ROUTE_COLORS.length],
-      dashArray: "8,4", // Dashed line for non-best routes
-      smoothFactor: 1,
-      noClip: false
-    };
-  };
-
-  /**
-   * Handle route click event
-   */
-  const handleRouteClick = (routeId) => {
-    if (onRouteClick) {
-      onRouteClick(routeId);
-    }
-  };
-
-  // Get start and end coordinates from the best route (first route as fallback)
-  const primaryRoute = routes.find(r => r.id === bestRouteId) || routes[0];
-  const startCoords = primaryRoute?.path?.[0] || [28.6139, 77.2090];
-  const endCoords = primaryRoute?.path?.[primaryRoute.path.length - 1] || [28.6320, 77.2200];
+  // If requested, also respect an external bestRouteId for emphasis (override to fastest if available)
+  const emphasizedId = fastestRoute?.id ?? bestRouteId ?? null;
 
   return (
-    <div className="w-full h-full relative">
-      <MapContainer
-        center={[28.6139, 77.2090]} // Default center (Delhi)
-        zoom={12}
-        className="w-full h-full"
-        ref={mapRef}
-        scrollWheelZoom={true}
-      >
-        {/* OpenStreetMap tile layer */}
+    <div style={{ height: "100%", width: "100%" }}>
+      <MapContainer center={center} zoom={12} style={{ height: "100%", width: "100%" }}>
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        {/* Render glow effect for best route (underneath the main line) */}
-        {bestRouteId && animatedPaths[bestRouteId] && animatedPaths[bestRouteId].length > 1 && (
-          <Polyline
-            positions={animatedPaths[bestRouteId]}
-            pathOptions={{
-              weight: 12,
-              opacity: 0.2,
-              color: '#22c55e',
-              smoothFactor: 1
-            }}
-          />
-        )}
-
-        {/* Render all route polylines */}
-        {routes.map((route, index) => {
-          const animatedPath = animatedPaths[route.id] || [];
-          
-          // Skip if path is not available
-          if (animatedPath.length < 2) return null;
-
+        {toRender.map(({ route, color }) => {
+          const path = extractPath(route.geometry);
+          if (path.length < 2) return null;
           return (
             <Polyline
-              key={`route-${route.id}`}
-              positions={animatedPath}
-              pathOptions={getPolylineStyle(index, route.id)}
-              eventHandlers={{
-                click: () => handleRouteClick(route.id)
+              key={route.id}
+              positions={path}
+              pathOptions={{
+                color: color,
+                weight: route.id === emphasizedId ? 6 : 4,
               }}
             />
           );
         })}
 
-        {/* Start marker (A) */}
-        {startCoords && (
-          <Marker position={startCoords} icon={startIcon} />
-        )}
-
-        {/* End marker (B) */}
-        {endCoords && (
-          <Marker position={endCoords} icon={endIcon} />
-        )}
+        {showLegacy && routes.map((route) => {
+          const path = extractPath(route.geometry);
+          if (path.length < 2) return null;
+          // Fallback: render in gray if legacy data exists but not matched by the new three-route logic
+          return (
+            <Polyline
+              key={route.id}
+              positions={path}
+              pathOptions={{ color: 'gray', weight: 2 }}
+            />
+          );
+        })}
+        {/* Animated exploration markers (optional) */}
+        {explorationPath && explorationPath.length > 0 && explorationPath.slice(0, exploredIndex + 1).map((p, idx) => {
+          const lat = p.lat ?? p[0] ?? null;
+          const lon = p.lon ?? p[1] ?? null;
+          if (typeof lat === 'number' && typeof lon === 'number') {
+            return (
+              <CircleMarker 
+                key={`expl-${idx}`} 
+                center={[lat, lon]} 
+                pathOptions={{ color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.5 }} 
+                radius={6} 
+              />
+            );
+          }
+          return null;
+        })}
       </MapContainer>
-
-      {/* Map legend */}
-      <div className="absolute bottom-4 left-4 bg-white/90 backdrop-blur-sm rounded-lg p-3 shadow-lg z-[1000]">
-        <h4 className="text-xs font-semibold text-gray-700 mb-2">Route Legend</h4>
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-1 bg-green-500 rounded"></div>
-            <span className="text-xs text-gray-600">Best Route</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-1 bg-blue-500 rounded" style={{ borderStyle: 'dashed' }}></div>
-            <span className="text-xs text-gray-600">Alternative</span>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
